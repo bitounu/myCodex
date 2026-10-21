@@ -3,6 +3,7 @@
 # shellcheck shell=bash
 set -euo pipefail
 umask 077
+# @MYCODEX_FILESYSTEM@
 MC_BUNDLE_VERSION='@VERSION@'
 MC_BUNDLE_ARCHIVE_SHA='@ARCHIVE_SHA@'
 MC_BUNDLE_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
@@ -15,7 +16,7 @@ mc_bundle_sha() {
 mc_bundle_verify_tree() {
   local digest path
   while read -r digest path; do
-    [[ -f "$1/${path}" && ! -L "$1/${path}" \
+    [[ -f "$1/${path}" && ! -L "$1/${path}" && "$(realpath -- "$1/${path}")" == "$1/${path}" \
       && "$(mc_bundle_sha <"$1/${path}")" == "${digest}" ]] || return 1
   done <<'MYCODEX_PAYLOAD_CHECKSUMS'
 @CHECKSUMS@
@@ -29,10 +30,13 @@ for mc_tool in tar gzip base64 flock; do
 done
 mc_data="${XDG_DATA_HOME:-}"
 [[ "${mc_data}" == /* ]] || mc_data="${HOME}/.local/share"
+[[ "${mc_data}" != *$'\n'* ]] || { mc_release_fs_error 'release directories cannot contain newlines'; exit 1; }
+mc_data="$(realpath -m -- "${mc_data}")"
 mc_data="${mc_data}/myCodex/releases"
-mkdir -p -- "${mc_data}"
+mc_release_fs_directory "${mc_data}" 1
 mc_root="${mc_data}/${MC_BUNDLE_VERSION}-${MC_BUNDLE_ARCHIVE_SHA}"
-exec {mc_lock}>"${mc_data}/${MC_BUNDLE_ARCHIVE_SHA}.lock"
+mc_release_fs_file "${mc_data}/${MC_BUNDLE_ARCHIVE_SHA}.lock" 1
+exec {mc_lock}>>"${mc_data}/${MC_BUNDLE_ARCHIVE_SHA}.lock"
 flock "${mc_lock}"
 if [[ ! -e "${mc_root}" && ! -L "${mc_root}" ]]; then
   mc_stage="$(mktemp -d "${mc_data}/unpack.XXXXXXXX")"
@@ -45,7 +49,7 @@ if [[ ! -e "${mc_root}" && ! -L "${mc_root}" ]]; then
   mc_bundle_verify_tree "${mc_stage}/payload" || {
     printf 'myCodex: extracted payload checksum failed\n' >&2; exit 1;
   }
-  mv -- "${mc_stage}/payload" "${mc_root}"
+  mc_release_fs_move "${mc_stage}/payload" "${mc_root}" new
 fi
 if [[ ! -d "${mc_root}" || -L "${mc_root}" || ! -O "${mc_root}" ]] || ! mc_bundle_verify_tree "${mc_root}"; then
   printf 'myCodex: extracted release files changed at %s; refusing to execute them\n' "${mc_root}" >&2

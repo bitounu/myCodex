@@ -19,7 +19,10 @@ checksums on subsequent launches. Keep the source checkout for image publication
 with `bin/build-codex-image.sh`, which needs Git metadata.
 
 In addition to the existing launcher requirements, the bundle needs `tar`,
-`gzip`, `base64`, `flock`, and a SHA-256 tool (`sha256sum`, `shasum`, or `openssl`).
+`gzip`, `base64`, `flock`, a SHA-256 tool (`sha256sum`, `shasum`, or `openssl`),
+and GNU `mv` with `--no-copy` support (`gmv` is also recognized). The last
+requirement makes filesystem replacements fail rather than fall back to copying
+and removing their sources when an atomic rename is unavailable.
 Installing/updating needs `ssh-keygen` with SSHSIG support; network release checks
 and updates need host `curl`. These host commands must also be available on macOS;
 the release is architecture-independent Bash, not a native binary. Python, GitHub
@@ -94,14 +97,20 @@ at an unoccupied path.
 The updater checks the signature against the installed trusted keys, verifies
 the repository/version/channel and executable digest/size, and stages on the
 destination filesystem before atomic replacement. Per-installation locks and
-last-moment path/digest checks protect cooperating updates and developer symlink
-changes. A failed download or activation leaves the current executable usable.
+last-moment path/digest checks protect cooperating updates and detect developer
+symlink changes before replacement. A failed download or activation leaves the
+current executable usable.
 Verified receipts are prepared before activation, so an interrupted update can
-be retried. These checks protect normal concurrent operations; another process
-with unrestricted access to the same user account can still modify installations.
+be retried. Unexpected symlinks and file types in application storage are refused;
+lock files are never truncated. Renames use an exact destination, hold its parent
+directory open as the working directory, and refuse cross-filesystem fallback.
+These checks protect normal concurrent operations; another process with write
+access can still replace the final directory entry between its validation and
+the rename. This is not a guarantee against arbitrary concurrent filesystem
+changes. See the [update and rollback safety review](update-safety.md).
 
 Rollback restores the previous verified launcher; repeating it switches back.
-It does not roll back container state. The highest installed version is retained
+It does not roll back container state. The highest successfully installed version is retained
 to reject ordinary downgrades, including after rollback. An explicit version
 and `--allow-downgrade` authorize installing an older release.
 

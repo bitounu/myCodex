@@ -3,6 +3,8 @@
 # previous releases are retained intentionally; this module never deletes files.
 # Each command initializes its own installation record inside its subshell.
 # shellcheck disable=SC2030,SC2031
+# shellcheck source=bin/lib/mycodex-release-files.sh
+source "${BASH_SOURCE[0]%/*}/mycodex-release-files.sh"
 
 mc_release_error() { printf 'myCodex: %s\n' "$*" >&2; return 1; }
 
@@ -37,6 +39,8 @@ mc_release_require() {
 mc_release_xdg() {
   local value="${!1:-}"
   if [[ "${value}" != /* ]]; then value="${HOME:?HOME is required}/$2"; fi
+  [[ "${value}" != *$'\n'* ]] || { mc_release_error 'release directories cannot contain newlines'; return 1; }
+  value="$(realpath -m -- "${value}")" || return
   printf '%s/myCodex\n' "${value}"
 }
 
@@ -123,7 +127,8 @@ mc_release_print_version() {
 mc_release_read_manifest() {
   local directory="$1" key value count=0
   local -A fields=()
-  [[ -f "${directory}/release.manifest" && $(wc -c <"${directory}/release.manifest") -lt 8192 ]] || {
+  [[ -f "${directory}/release.manifest" && ! -L "${directory}/release.manifest" \
+    && $(wc -c <"${directory}/release.manifest") -lt 8192 ]] || {
     mc_release_error 'missing or oversized release manifest'; return 1;
   }
   while IFS='=' read -r key value; do
@@ -157,7 +162,9 @@ mc_release_read_manifest() {
 mc_release_verify_manifest() {
   local directory="$1"
   mc_release_require ssh-keygen || return
-  [[ -f "${directory}/release.manifest.sig" && -f "${MC_RELEASE_SIGNERS}" ]] || {
+  [[ -f "${directory}/release.manifest" && ! -L "${directory}/release.manifest" \
+    && -f "${directory}/release.manifest.sig" && ! -L "${directory}/release.manifest.sig" \
+    && -f "${MC_RELEASE_SIGNERS}" ]] || {
     mc_release_error 'release signature or trusted signing key is missing'; return 1;
   }
   ssh-keygen -Y verify -f "${MC_RELEASE_SIGNERS}" -I emsi -n mycodex-release \
@@ -196,7 +203,7 @@ mc_release_download_metadata() {
     [[ "${requested}" != *-rc.* ]] || { mc_release_error 'latest release is not stable'; return 1; }
   fi
   mc_release_version_valid "${requested}" || { mc_release_error 'invalid requested release version'; return 1; }
-  mkdir -p -- "${MC_RELEASE_CACHE}/downloads" || return
+  mc_release_fs_directory "${MC_RELEASE_CACHE}/downloads" 1 || return
   directory="$(mktemp -d "${MC_RELEASE_CACHE}/downloads/release.XXXXXXXX")" || return
   base="https://github.com/emsi/myCodex/releases/download/v${requested}"
   mc_release_http --max-filesize 8192 -o "${directory}/release.manifest" "${base}/release.manifest" || return
@@ -219,51 +226,65 @@ mc_release_install_record() {
   }
   id="$(mc_release_install_id "${target}")" || return
   MC_INSTALL_DIR="${MC_RELEASE_STATE}/installations/${id}"
+  mc_release_fs_directory "${MC_INSTALL_DIR}" || {
+    mc_release_error 'unregistered or unsafe installation record; refusing update'; return 1;
+  }
+  mc_release_fs_file "${MC_INSTALL_DIR}/target" || return
   [[ -f "${MC_INSTALL_DIR}/target" && "$(cat "${MC_INSTALL_DIR}/target")" == "${target}" ]] || {
     mc_release_error 'unregistered executable; use install to create a managed installation'; return 1;
   }
   digest="$(mc_release_sha "${target}")" || return
   MC_INSTALL_OBJECT="${MC_INSTALL_DIR}/versions/${digest}"
+  mc_release_fs_directory "${MC_INSTALL_OBJECT}" || return
   mc_release_verify_asset "${MC_INSTALL_OBJECT}" "${target}" || {
     mc_release_error 'installation was modified or has no verified receipt; it will not be overwritten'; return 1;
   }
   MC_INSTALL_SHA="${digest}"
 }
 
-# Receipts are keyed by executable digest and prepared before activation. Thus a
-# crash before/after the rename leaves either the old or new receipt usable.
-mc_release_activate() {
-  local target="$1" directory="$2" expected="$3" previous="$4"
-  local digest version object staged receipt high temporary
-  mc_release_verify_asset "${directory}" || return
-  digest="${MC_REMOTE_SHA}"; version="${MC_REMOTE_VERSION}"
-  object="${MC_INSTALL_DIR}/versions/${digest}"
-  if [[ ! -d "${object}" ]]; then
-    receipt="$(mktemp -d "${MC_INSTALL_DIR}/receipt.XXXXXXXX")" || return
-    cp -- "${directory}/myCodex" "${directory}/release.manifest" "${directory}/release.manifest.sig" "${receipt}/" || return
-    printf '%s\n' "${previous}" >"${receipt}/previous"
-    mkdir -p -- "${MC_INSTALL_DIR}/versions" || return
-    mv -- "${receipt}" "${object}" || return
-  else
-    mc_release_verify_asset "${object}" || return
-  fi
-  staged="$(mktemp "$(dirname -- "${target}")/.myCodex-stage.XXXXXXXX")" || return
-  cp -- "${object}/myCodex" "${staged}" || return
-  chmod 755 "${staged}" || return
-  mc_release_verify_asset "${object}" "${staged}" || return
+mc_release_mark_highest() {
+  local version="$1" high temporary
+  mc_release_fs_file "${MC_INSTALL_DIR}/highest" 1 || return
   high="$(cat "${MC_INSTALL_DIR}/highest" 2>/dev/null || true)"
   if [[ -n "${high}" ]]; then
     mc_release_version_valid "${high}" || { mc_release_error 'invalid installation version history'; return 1; }
   fi
   if [[ -z "${high}" || "$(mc_release_compare "${version}" "${high}")" == 1 ]]; then
     temporary="$(mktemp "${MC_INSTALL_DIR}/highest.XXXXXXXX")" || return
-    printf '%s\n' "${version}" >"${temporary}"
-    mv -- "${temporary}" "${MC_INSTALL_DIR}/highest" || return
+    printf '%s\n' "${version}" >"${temporary}" || return
+    mc_release_fs_move "${temporary}" "${MC_INSTALL_DIR}/highest" || return
   fi
+}
+
+# Receipts are keyed by executable digest and prepared before activation. Thus a
+# crash before/after the rename leaves either the old or new receipt usable.
+mc_release_activate() {
+  local target="$1" directory="$2" expected="$3" previous="$4"
+  local digest version object staged receipt temporary
+  mc_release_verify_asset "${directory}" || return
+  digest="${MC_REMOTE_SHA}"; version="${MC_REMOTE_VERSION}"
+  object="${MC_INSTALL_DIR}/versions/${digest}"
+  mc_release_fs_directory "${MC_INSTALL_DIR}/versions" 1 || return
+  mc_release_fs_file "${MC_INSTALL_DIR}/highest" 1 || return
+  mc_release_fs_file "${MC_INSTALL_DIR}/previous-${digest}" 1 || return
+  if [[ ! -e "${object}" && ! -L "${object}" ]]; then
+    receipt="$(mktemp -d "${MC_INSTALL_DIR}/receipt.XXXXXXXX")" || return
+    cp -- "${directory}/myCodex" "${directory}/release.manifest" "${directory}/release.manifest.sig" "${receipt}/" || return
+    printf '%s\n' "${previous}" >"${receipt}/previous" || return
+    mc_release_fs_move "${receipt}" "${object}" new || return
+  else
+    mc_release_fs_directory "${object}" || return
+    mc_release_verify_asset "${object}" || return
+  fi
+  mc_release_fs_directory "$(dirname -- "${target}")" || return
+  staged="$(mktemp "$(dirname -- "${target}")/.myCodex-stage.XXXXXXXX")" || return
+  cp -- "${object}/myCodex" "${staged}" || return
+  chmod 755 "${staged}" || return
+  mc_release_verify_asset "${object}" "${staged}" || return
   # Preserve the predecessor separately even when rolling back to an old object.
   temporary="$(mktemp "${MC_INSTALL_DIR}/previous.XXXXXXXX")" || return
-  printf '%s\n' "${previous}" >"${temporary}"
-  mv -- "${temporary}" "${MC_INSTALL_DIR}/previous-${digest}" || return
+  printf '%s\n' "${previous}" >"${temporary}" || return
+  mc_release_fs_move "${temporary}" "${MC_INSTALL_DIR}/previous-${digest}" || return
   [[ ! -L "${target}" && "$(realpath -m -- "${target}")" == "${target}" \
     && -z "$(mc_release_git_root "${target}" || true)" ]] || {
     mc_release_error 'installation path changed; refusing replacement'; return 1;
@@ -275,13 +296,20 @@ mc_release_activate() {
       mc_release_error 'executable changed during update; refusing replacement'; return 1;
     }
   fi
-  mv -f -- "${staged}" "${target}" || return
+  if [[ "${expected}" == absent ]]; then
+    mc_release_fs_move "${staged}" "${target}" new || return
+  else
+    mc_release_fs_move "${staged}" "${target}" || return
+  fi
+  # Only successful activation advances history. If this write is interrupted,
+  # the next update/rollback recovers it from the active, verified executable.
+  mc_release_mark_highest "${version}" || return
   printf 'myCodex: installed %s at %s\n' "${version}" "${target}"
 }
 
 mc_release_install() (
   umask 077
-  local name=myCodex bin_dir="${HOME}/.local/bin" manifest_dir="" target id lockfd
+  local name=myCodex bin_dir="${HOME}/.local/bin" manifest_dir="" target id lockfd temporary
   if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then mc_release_usage; exit 0; fi
   [[ "${MC_RELEASE_KIND}" == release ]] || {
     mc_release_error 'install requires a packaged release; source checkouts are managed through Git'; exit 1;
@@ -312,11 +340,14 @@ mc_release_install() (
   }
   id="$(mc_release_install_id "${target}")"
   MC_INSTALL_DIR="${MC_RELEASE_STATE}/installations/${id}"
-  mkdir -p -- "${MC_INSTALL_DIR}" || exit
-  exec {lockfd}>"${MC_INSTALL_DIR}/lock"
+  mc_release_fs_directory "${MC_INSTALL_DIR}" 1 || exit
+  mc_release_fs_file "${MC_INSTALL_DIR}/lock" 1 || exit
+  exec {lockfd}>>"${MC_INSTALL_DIR}/lock"
   flock -n "${lockfd}" || { mc_release_error 'another installation or update is running'; exit 1; }
   [[ ! -e "${target}" && ! -L "${target}" ]] || { mc_release_error 'installation path became occupied'; exit 1; }
-  printf '%s\n' "${target}" >"${MC_INSTALL_DIR}/target"
+  temporary="$(mktemp "${MC_INSTALL_DIR}/target.XXXXXXXX")" || exit
+  printf '%s\n' "${target}" >"${temporary}" || exit
+  mc_release_fs_move "${temporary}" "${MC_INSTALL_DIR}/target" || exit
   local directory
   directory="$(mktemp -d "${MC_INSTALL_DIR}/initial.XXXXXXXX")" || exit
   cp -- "${MC_RELEASE_EXECUTABLE}" "${directory}/myCodex" || exit
@@ -365,11 +396,14 @@ mc_release_update() (
   mc_release_require flock || exit
   target="${MC_RELEASE_EXECUTABLE}"
   mc_release_install_record "${target}" || exit
-  exec {lockfd}>"${MC_INSTALL_DIR}/lock"
+  mc_release_fs_file "${MC_INSTALL_DIR}/lock" 1 || exit
+  exec {lockfd}>>"${MC_INSTALL_DIR}/lock"
   flock -n "${lockfd}" || { mc_release_error 'another installation or update is running'; exit 1; }
   mc_release_install_record "${target}" || exit
   expected="${MC_INSTALL_SHA}"
+  mc_release_mark_highest "${MC_REMOTE_VERSION}" || exit
   if [[ "${rollback}" == 1 ]]; then
+    mc_release_fs_file "${MC_INSTALL_DIR}/previous-${expected}" || exit
     previous="$(cat "${MC_INSTALL_DIR}/previous-${expected}" 2>/dev/null || true)"
     [[ "${previous}" =~ ^[0-9a-f]{64}$ && "${previous}" != "${expected}" ]] || {
       mc_release_error 'no previous verified launcher is available'; exit 1;
@@ -401,20 +435,22 @@ mc_release_check_background() (
   umask 077
   local lockfd now last temporary
   mc_release_require flock curl ssh-keygen >/dev/null 2>&1 || exit 0
-  mkdir -p -- "${MC_RELEASE_CACHE}" || exit 0
-  exec {lockfd}>"${MC_RELEASE_CACHE}/check.lock"
+  mc_release_fs_directory "${MC_RELEASE_CACHE}" 1 || exit 0
+  mc_release_fs_file "${MC_RELEASE_CACHE}/check.lock" 1 || exit 0
+  exec {lockfd}>>"${MC_RELEASE_CACHE}/check.lock"
   flock -n "${lockfd}" || exit 0
   now="$(date +%s)"
+  mc_release_fs_file "${MC_RELEASE_CACHE}/checked-at" 1 || exit 0
   last="$(cat "${MC_RELEASE_CACHE}/checked-at" 2>/dev/null || true)"
   [[ "${last}" =~ ^[0-9]{1,12}$ ]] || last=0
   (( now < last || now - last >= 86400 )) || exit 0
   temporary="$(mktemp "${MC_RELEASE_CACHE}/checked-at.XXXXXXXX")" || exit 0
-  printf '%s\n' "${now}" >"${temporary}"
-  mv -- "${temporary}" "${MC_RELEASE_CACHE}/checked-at" || exit 0
+  printf '%s\n' "${now}" >"${temporary}" || exit 0
+  mc_release_fs_move "${temporary}" "${MC_RELEASE_CACHE}/checked-at" || exit 0
   mc_release_download_metadata || exit 0
   temporary="$(mktemp "${MC_RELEASE_CACHE}/latest.XXXXXXXX")" || exit 0
-  printf '%s\n' "${MC_RELEASE_DOWNLOAD}" >"${temporary}"
-  mv -- "${temporary}" "${MC_RELEASE_CACHE}/latest"
+  printf '%s\n' "${MC_RELEASE_DOWNLOAD}" >"${temporary}" || exit 0
+  mc_release_fs_move "${temporary}" "${MC_RELEASE_CACHE}/latest"
 )
 
 mc_release_notice() {
@@ -424,19 +460,22 @@ mc_release_notice() {
   # All streams are detached: attach never waits for a network request or gets
   # background output mixed into its terminal. A fresh result appears next time.
   (mc_release_check_background </dev/null >/dev/null 2>&1 &) 2>/dev/null
+  mc_release_fs_file "${MC_RELEASE_CACHE}/latest" || return 0
   directory="$(cat "${MC_RELEASE_CACHE}/latest" 2>/dev/null || true)"
   [[ "${directory}" == "${MC_RELEASE_CACHE}/downloads/"* ]] || return 0
+  mc_release_fs_directory "${directory}" || return 0
   mc_release_verify_manifest "${directory}" >/dev/null 2>&1 || return 0
   if [[ "${MC_RELEASE_KIND}" == release ]]; then
     [[ "$(mc_release_compare "${MC_RELEASE_VERSION}" "${MC_REMOTE_VERSION}")" == -1 ]] || return 0
   fi
   id="$(mc_release_install_id "${MC_RELEASE_EXECUTABLE}")" || return 0
   shown="${MC_RELEASE_STATE}/notices/${id}"
+  (umask 077; mc_release_fs_directory "${MC_RELEASE_STATE}/notices" 1) || return 0
+  mc_release_fs_file "${shown}" 1 || return 0
   [[ "$(cat "${shown}" 2>/dev/null || true)" != "${MC_REMOTE_VERSION}" ]] || return 0
-  (umask 077; mkdir -p -- "${MC_RELEASE_STATE}/notices") || return 0
   temporary="$(mktemp "${MC_RELEASE_STATE}/notices/seen.XXXXXXXX")" || return 0
-  printf '%s\n' "${MC_REMOTE_VERSION}" >"${temporary}"
-  mv -- "${temporary}" "${shown}" || return 0
+  printf '%s\n' "${MC_REMOTE_VERSION}" >"${temporary}" || return 0
+  mc_release_fs_move "${temporary}" "${shown}" || return 0
   if [[ "${MC_RELEASE_KIND}" == source ]]; then
     printf 'myCodex: launcher release %s is available; this development checkout is managed through Git.\n' "${MC_REMOTE_VERSION}"
   else
