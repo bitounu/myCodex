@@ -298,11 +298,39 @@ class ReleaseTest(unittest.TestCase):
         self.env['TEST_INSTALL_TARGET'] = str(self.installed)
         self.assertNotEqual(self.command('update', check=False).returncode, 0)
         self.assertEqual(self.installed.read_bytes(), before)
+        self.assertEqual((self.record() / 'highest').read_text().strip(), '2026.10.1')
         self.assertIn('2026.10.1', self.command('--version').stdout)
         self.env['TEST_INSTALL_TARGET'] = ''
+        (self.transport / 'latest').write_text('2026.10.1')
+        self.assertIn('already up to date', self.command('update').stdout)
+        (self.transport / 'latest').write_text('2026.10.2')
         self.command('update')
+        self.assertEqual((self.record() / 'highest').read_text().strip(), '2026.10.2')
         self.command('update', '--rollback')
         self.assertIn('2026.10.1', self.command('--version').stdout)
+        self.assertEqual((self.record() / 'highest').read_text().strip(), '2026.10.2')
+
+    def test_failed_history_write_recovers_on_update_or_rollback(self):
+        for operation in (('update',), ('update', '--rollback')):
+            with self.subTest(operation=operation):
+                self.setUp()
+                self.install()
+                fake = Path(self.env['PATH'].split(':')[0])
+                (fake / 'mv').write_text('#!/usr/bin/env bash\n'
+                                        'if [[ "${!#}" == "$TEST_HISTORY_TARGET" ]]; then exit 1; fi\n'
+                                        f'exec "{shutil.which("mv")}" "$@"\n')
+                (fake / 'mv').chmod(0o755)
+                self.env['TEST_HISTORY_TARGET'] = str(self.record() / 'highest')
+                self.assertNotEqual(self.command('update', check=False).returncode, 0)
+                self.assertIn('2026.10.2', self.command('--version').stdout)
+                self.assertEqual((self.record() / 'highest').read_text().strip(), '2026.10.1')
+                self.env['TEST_HISTORY_TARGET'] = ''
+                self.command(*operation)
+                version = '2026.10.1' if '--rollback' in operation else '2026.10.2'
+                self.assertIn(version, self.command('--version').stdout)
+                self.assertEqual((self.record() / 'highest').read_text().strip(), '2026.10.2')
+                (self.transport / 'latest').write_text('2026.10.1')
+                self.assertNotEqual(self.command('update', check=False).returncode, 0)
 
     def test_update_lock_and_symlink_swap(self):
         self.install()

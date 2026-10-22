@@ -230,6 +230,19 @@ mc_release_install_record() {
   MC_INSTALL_SHA="${digest}"
 }
 
+mc_release_record_highest() {
+  local version="$1" high temporary
+  high="$(cat "${MC_INSTALL_DIR}/highest" 2>/dev/null || true)"
+  if [[ -n "${high}" ]]; then
+    mc_release_version_valid "${high}" || { mc_release_error 'invalid installation version history'; return 1; }
+  fi
+  if [[ -z "${high}" || "$(mc_release_compare "${version}" "${high}")" == 1 ]]; then
+    temporary="$(mktemp "${MC_INSTALL_DIR}/highest.XXXXXXXX")" || return
+    printf '%s\n' "${version}" >"${temporary}" || return
+    mv -- "${temporary}" "${MC_INSTALL_DIR}/highest" || return
+  fi
+}
+
 # Receipts are keyed by executable digest and prepared before activation. Thus a
 # crash before/after the rename leaves either the old or new receipt usable.
 mc_release_activate() {
@@ -255,11 +268,6 @@ mc_release_activate() {
   if [[ -n "${high}" ]]; then
     mc_release_version_valid "${high}" || { mc_release_error 'invalid installation version history'; return 1; }
   fi
-  if [[ -z "${high}" || "$(mc_release_compare "${version}" "${high}")" == 1 ]]; then
-    temporary="$(mktemp "${MC_INSTALL_DIR}/highest.XXXXXXXX")" || return
-    printf '%s\n' "${version}" >"${temporary}"
-    mv -- "${temporary}" "${MC_INSTALL_DIR}/highest" || return
-  fi
   # Preserve the predecessor separately even when rolling back to an old object.
   temporary="$(mktemp "${MC_INSTALL_DIR}/previous.XXXXXXXX")" || return
   printf '%s\n' "${previous}" >"${temporary}"
@@ -276,6 +284,8 @@ mc_release_activate() {
     }
   fi
   mv -f -- "${staged}" "${target}" || return
+  # Only a successfully activated executable advances the version history.
+  mc_release_record_highest "${version}" || return
   printf 'myCodex: installed %s at %s\n' "${version}" "${target}"
 }
 
@@ -369,6 +379,9 @@ mc_release_update() (
   flock -n "${lockfd}" || { mc_release_error 'another installation or update is running'; exit 1; }
   mc_release_install_record "${target}" || exit
   expected="${MC_INSTALL_SHA}"
+  # Recover an interrupted history write from the active, verified executable
+  # before selecting a new release or rolling back to an older one.
+  mc_release_record_highest "${MC_REMOTE_VERSION}" || exit
   if [[ "${rollback}" == 1 ]]; then
     previous="$(cat "${MC_INSTALL_DIR}/previous-${expected}" 2>/dev/null || true)"
     [[ "${previous}" =~ ^[0-9a-f]{64}$ && "${previous}" != "${expected}" ]] || {
