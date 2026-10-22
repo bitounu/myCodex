@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"2[0-9]{3}\.(?:[1-9]|1[0-2])\.[1-9][0-9]{0,5}(?:-rc\.[1-9][0-9]{0,5})?")
 PAYLOAD = (
     "bin/myCodex", "bin/lib/mycodex-image.sh", "bin/lib/mycodex-gpu.sh",
-    "bin/lib/mycodex-tmux.sh", "bin/lib/mycodex-release.sh", "bin/lib/mycodex-release-files.sh",
+    "bin/lib/mycodex-tmux.sh", "bin/lib/mycodex-release.sh",
     "docker-compose.yaml", "docker-compose.gui-x11.yaml", "docker-compose.gui-wayland.yaml",
     "Dockerfile", "entrypoint.sh", "release/allowed_signers",
 )
@@ -68,7 +68,6 @@ def build(version, output, root=ROOT, allow_dirty=False):
     template = read_input("release/bootstrap.sh").decode()
     checksums = "\n".join(f"{hashlib.sha256(data).hexdigest()}  {name}" for name, data in sorted(contents.items()))
     header = template.replace("@VERSION@", version).replace("@ARCHIVE_SHA@", sha).replace("@CHECKSUMS@", checksums)
-    header = header.replace("# @MYCODEX_FILESYSTEM@", contents["bin/lib/mycodex-release-files.sh"].decode())
     executable = (preflight + header + "\n__MYCODEX_ARCHIVE__\n").encode() + base64.encodebytes(payload)
     digest = hashlib.sha256(executable).hexdigest()
     channel = "prerelease" if "-rc." in version else "stable"
