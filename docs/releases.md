@@ -112,6 +112,18 @@ a later attach, once per release per executable. Explicit `update --check`
 checks immediately. Offline failures do not delay or fail attachment.
 `MYCODEX_UPDATE_CHECK` continues to control the separate **Codex package** check.
 
+Release network timeouts apply to each HTTP request, including redirects:
+
+| Operation | Connection timeout (DNS, TCP and TLS setup) | Total request timeout |
+| --- | --- | --- |
+| Explicit `update --check` and `update`, including launcher downloads | 15 seconds | 120 seconds |
+| Automatic background release check | 5 seconds | 15 seconds |
+
+An explicit check fetches the latest-release redirect, manifest and signature in
+separate requests; an update also downloads the launcher. These limits are per
+request, not a single deadline for the whole command. Background checks remain
+detached from attachment.
+
 Both development and released launchers can address the same project's Docker
 container. Distinct command names do not create independent environments. Use a
 distinct test project/container identity for independent testing.

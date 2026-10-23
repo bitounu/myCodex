@@ -12,9 +12,12 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import socketserver
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -403,6 +406,48 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(run("bash", "-c", script, "test", payload, env=self.env).stdout, "")
         time.sleep(0.1)
         self.assertEqual(len((self.transport / "requests").read_text().splitlines()), count)
+
+    @unittest.skipUnless(shutil.which('curl') and shutil.which('openssl'),
+                         'curl and openssl are required for real HTTPS timeout testing')
+    def test_real_https_connection_timeouts(self):
+        certificate = self.temp / 'server.crt'
+        key = self.temp / 'server.key'
+        run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+            '-keyout', key, '-out', certificate, '-days', '1',
+            '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key)
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                time.sleep(self.server.handshake_delay)
+                try:
+                    with context.wrap_socket(self.request, server_side=True) as connection:
+                        connection.recv(4096)
+                        connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n'
+                                           b'Connection: close\r\n\r\nok')
+                except OSError:
+                    # A client that times out closes the connection before TLS starts.
+                    pass
+
+        script = 'source "$1"; mc_release_http "$2" --noproxy "*" --cacert "$3" "$4"'
+        environment = dict(self.env, PATH=os.environ['PATH'])  # Use real curl, not the transport fixture.
+        for mode, delay, expected_status in (('foreground', 4, 0), ('background', 6, 28)):
+            with self.subTest(mode=mode), socketserver.ThreadingTCPServer(('127.0.0.1', 0), Handler) as server:
+                server.daemon_threads = True
+                server.handshake_delay = delay
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    result = run('bash', '-c', script, 'test', ROOT / 'bin/lib/mycodex-release.sh',
+                                 mode, certificate, f'https://127.0.0.1:{server.server_address[1]}/',
+                                 env=environment, check=False)
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+                    if expected_status == 0:
+                        self.assertEqual(result.stdout, 'ok')
+                finally:
+                    server.shutdown()
+                    thread.join()
 
     def test_publication_without_developer_tests_signs_and_verifies_before_publish(self):
         # Real SSH tag signing and Git push to a private local bare repository;

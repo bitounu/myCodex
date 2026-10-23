@@ -177,15 +177,21 @@ mc_release_verify_asset() {
 }
 
 mc_release_http() {
-  curl --proto '=https' --proto-redir '=https' --connect-timeout 3 --max-time 15 \
+  local mode="$1" connect_timeout=15 request_timeout=120
+  shift
+  if [[ "${mode}" == background ]]; then
+    connect_timeout=5
+    request_timeout=15
+  fi
+  curl --proto '=https' --proto-redir '=https' --connect-timeout "${connect_timeout}" --max-time "${request_timeout}" \
     --fail --silent --show-error --location "$@"
 }
 
 mc_release_download_metadata() {
-  local requested="${1:-}" effective base directory
+  local requested="${1:-}" mode="${2:-foreground}" effective base directory
   mc_release_require curl ssh-keygen || return
   if [[ -z "${requested}" ]]; then
-    effective="$(mc_release_http -o /dev/null -w '%{url_effective}' \
+    effective="$(mc_release_http "${mode}" -o /dev/null -w '%{url_effective}' \
       https://github.com/emsi/myCodex/releases/latest)" || {
       mc_release_error 'could not check GitHub releases (offline, rate limited, or no stable release yet)'; return 1;
     }
@@ -199,8 +205,8 @@ mc_release_download_metadata() {
   mkdir -p -- "${MC_RELEASE_CACHE}/downloads" || return
   directory="$(mktemp -d "${MC_RELEASE_CACHE}/downloads/release.XXXXXXXX")" || return
   base="https://github.com/emsi/myCodex/releases/download/v${requested}"
-  mc_release_http --max-filesize 8192 -o "${directory}/release.manifest" "${base}/release.manifest" || return
-  mc_release_http --max-filesize 16384 -o "${directory}/release.manifest.sig" "${base}/release.manifest.sig" || return
+  mc_release_http "${mode}" --max-filesize 8192 -o "${directory}/release.manifest" "${base}/release.manifest" || return
+  mc_release_http "${mode}" --max-filesize 16384 -o "${directory}/release.manifest.sig" "${base}/release.manifest.sig" || return
   mc_release_verify_manifest "${directory}" || return
   [[ "${MC_REMOTE_VERSION}" == "${requested}" ]] || { mc_release_error 'release tag and signed version differ'; return 1; }
   MC_RELEASE_DOWNLOAD="${directory}"
@@ -404,7 +410,7 @@ mc_release_update() (
   if [[ "${MC_REMOTE_VERSION}" == "${MC_RELEASE_VERSION}" ]]; then
     mc_release_error 'release content changed without a new version'; exit 1
   fi
-  mc_release_http --max-filesize "${MC_REMOTE_SIZE}" -o "${MC_RELEASE_DOWNLOAD}/myCodex" \
+  mc_release_http foreground --max-filesize "${MC_REMOTE_SIZE}" -o "${MC_RELEASE_DOWNLOAD}/myCodex" \
     "${MC_RELEASE_DOWNLOAD_BASE}/myCodex" || exit
   mc_release_verify_asset "${MC_RELEASE_DOWNLOAD}" || exit
   mc_release_activate "${target}" "${MC_RELEASE_DOWNLOAD}" "${expected}" "${expected}"
@@ -424,7 +430,7 @@ mc_release_check_background() (
   temporary="$(mktemp "${MC_RELEASE_CACHE}/checked-at.XXXXXXXX")" || exit 0
   printf '%s\n' "${now}" >"${temporary}"
   mv -- "${temporary}" "${MC_RELEASE_CACHE}/checked-at" || exit 0
-  mc_release_download_metadata || exit 0
+  mc_release_download_metadata '' background || exit 0
   temporary="$(mktemp "${MC_RELEASE_CACHE}/latest.XXXXXXXX")" || exit 0
   printf '%s\n' "${MC_RELEASE_DOWNLOAD}" >"${temporary}"
   mv -- "${temporary}" "${MC_RELEASE_CACHE}/latest"
