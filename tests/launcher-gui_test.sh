@@ -358,7 +358,7 @@ for failure in xauth credentials merge stale ssh remote desktop unavailable; do
     export DISPLAY=":${x11_display_number}"
     case "${failure}" in
       xauth)
-        # shellcheck disable=SC2317 # Exported for calls in the child launcher.
+        # shellcheck disable=SC2317,SC2329 # Exported for calls in the child launcher.
         command() {
           [[ "$*" != '-v xauth' ]] || return 1
           builtin command "$@"
