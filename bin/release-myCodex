@@ -58,7 +58,11 @@ def publish(version, commit, directory, key, notes):
         present = {asset["name"] for asset in release["assets"]}
     else:
         command = ["gh", "release", "create", tag, "--repo", REPOSITORY, "--draft", "--verify-tag",
-                   "--title", f"myCodex {version}", "--notes-file", str(notes)]
+                   "--title", f"myCodex {version}"]
+        if notes is None:
+            command.append("--generate-notes")
+        else:
+            command.extend(["--notes-file", str(notes)])
         if "-rc." in version:
             command.append("--prerelease")
         run(*command)
@@ -84,12 +88,13 @@ def main():
                         help="local SSH private key, or public key whose private half is in ssh-agent")
     parser.add_argument("--output-dir", type=lambda value: Path(value).expanduser().resolve(),
                         help="new directory outside the checkout (default: a retained temporary directory)")
-    parser.add_argument("--notes-file", type=lambda value: Path(value).expanduser().resolve())
+    parser.add_argument("--notes-file", type=lambda value: Path(value).expanduser().resolve(),
+                        help="custom release notes; publishing generates GitHub notes when omitted")
     parser.add_argument("--publish", action="store_true", help="push the signed tag and publish after asset verification")
     args = parser.parse_args()
     try:
-        if args.publish and (not args.notes_file or not args.notes_file.is_file()):
-            raise ValueError("--publish requires an existing --notes-file")
+        if args.publish and args.notes_file is not None and not args.notes_file.is_file():
+            raise ValueError("--notes-file must name an existing file")
         if not args.signing_key.is_file():
             raise ValueError("signing key does not exist")
         directory = args.output_dir or Path(tempfile.mkdtemp(prefix="mycodex-local-release.")) / "artifacts"

@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -64,8 +65,14 @@ if command == 'view':
     print(json.dumps(result))
 elif command == 'create':
     assert '--draft' in args and '--verify-tag' in args
+    assert ('--generate-notes' in args) != ('--notes-file' in args)
+    if '--generate-notes' in args:
+        if os.environ.get('TEST_GH_GENERATE_FAIL'): sys.exit(1)
+        body = 'GitHub-generated release notes.\n'
+    else:
+        body = pathlib.Path(args[args.index('--notes-file') + 1]).read_text()
     (root / 'assets').mkdir()
-    state.write_text(json.dumps({'isDraft': True}))
+    state.write_text(json.dumps({'isDraft': True, 'body': body}))
 elif command == 'upload':
     source = pathlib.Path(args[3])
     target = root / 'assets' / source.name
@@ -78,7 +85,9 @@ elif command == 'download':
         with (destination / 'myCodex').open('a') as stream: stream.write('corrupt')
 elif command == 'edit':
     assert '--draft=false' in args
-    state.write_text(json.dumps({'isDraft': False}))
+    result = json.loads(state.read_text())
+    result['isDraft'] = False
+    state.write_text(json.dumps(result))
 else: sys.exit(2)
 '''
 
@@ -450,6 +459,21 @@ class ReleaseTest(unittest.TestCase):
                     thread.join()
 
     def test_publication_without_developer_tests_signs_and_verifies_before_publish(self):
+        self.check_publication(automatic_notes=False)
+
+    def test_publication_generates_notes_and_recovers_from_generation_failure(self):
+        self.check_publication(automatic_notes=True)
+
+    def test_publication_rejects_missing_explicit_notes_before_build(self):
+        directory = self.temp / 'publish-artifacts'
+        result = run(ROOT / 'bin/release-myCodex', '2026.10.1', '--signing-key', self.key,
+                     '--output-dir', directory, '--notes-file', self.temp / 'missing.md',
+                     '--publish', env=self.env, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('--notes-file must name an existing file', result.stderr)
+        self.assertFalse(directory.exists())
+
+    def check_publication(self, automatic_notes):
         # Real SSH tag signing and Git push to a private local bare repository;
         # only the GitHub transport and remote destination are substituted.
         loader = importlib.machinery.SourceFileLoader('publisher', str(ROOT / 'bin/release-myCodex'))
@@ -480,25 +504,43 @@ class ReleaseTest(unittest.TestCase):
         github = self.temp / 'github'
         github.mkdir()
         self.env['TEST_GH_STORE'] = str(github)
-        notes = self.temp / 'notes.md'
-        notes.write_text('Test release. No migration required.\n')
+        notes = None if automatic_notes else self.temp / 'notes.md'
+        expected_notes = ('GitHub-generated release notes.\n' if automatic_notes else
+                          'Test release. No migration required.\n')
+        if notes is not None:
+            notes.write_text(expected_notes)
         directory = self.temp / 'publish-artifacts'
         commit = builder.git(checkout, 'rev-parse', 'HEAD')
         argv = ['release-myCodex', '2026.10.1', '--signing-key', str(self.key),
-                '--output-dir', str(directory), '--notes-file', str(notes), '--publish']
+                '--output-dir', str(directory), '--publish']
+        if notes is not None:
+            argv.extend(['--notes-file', str(notes)])
         with patch.dict(os.environ, self.env, clear=True), patch.object(publisher, 'run', local_run), \
                 patch.object(sys, 'argv', argv), patch.object(publisher.builder, 'build',
                     side_effect=lambda version, output: real_build(version, output, root=checkout)):
-            # A corrupt download leaves a draft. Retrying verifies existing assets
-            # and publishes without clobbering any asset or signing key.
-            os.environ['TEST_GH_CORRUPT'] = '1'
+            # Generation failure must not publish an empty release. A corrupt
+            # download leaves a draft whose notes and assets survive a retry.
+            failure = 'TEST_GH_GENERATE_FAIL' if automatic_notes else 'TEST_GH_CORRUPT'
+            os.environ[failure] = '1'
             with self.assertRaises(SystemExit) as error:
                 publisher.main()
             self.assertEqual(error.exception.code, 1)
             self.assertNotIn('edit', (github / 'calls').read_text().splitlines())
-            os.environ.pop('TEST_GH_CORRUPT')
+            if automatic_notes:
+                self.assertFalse((github / 'state.json').exists())
+                self.assertNotIn('upload', (github / 'calls').read_text().splitlines())
+            else:
+                state = json.loads((github / 'state.json').read_text())
+                self.assertEqual(state['body'], expected_notes)
+                expected_notes = 'Manually edited draft notes.\n'
+                state['body'] = expected_notes
+                (github / 'state.json').write_text(json.dumps(state))
+            os.environ.pop(failure)
             publisher.publish('2026.10.1', commit, directory, self.key, notes)
             self.assertEqual((github / 'calls').read_text().splitlines()[-1], 'edit')
+            state = json.loads((github / 'state.json').read_text())
+            self.assertFalse(state['isDraft'])
+            self.assertEqual(state['body'], expected_notes)
             with self.assertRaises(ValueError):
                 publisher.publish('2026.10.1', commit, directory, self.key, notes)
         self.assert_no_docker()
