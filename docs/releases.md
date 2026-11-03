@@ -174,13 +174,23 @@ To build and sign locally, with the private key available in your SSH agent:
 ```
 
 To publish, first confirm GitHub CLI authentication with `gh auth status` (use
-`gh auth login` if needed). Write release notes, including any migration
-requirements, outside the checkout, for example `/tmp/mycodex-release-notes.md`.
-Then publish:
+`gh auth login` if needed). GitHub automatically generates release notes when
+the publisher creates the draft, choosing the previous release as the starting
+point:
+
+```bash
+./bin/release-myCodex 2026.10.1 --signing-key "$HOME/.ssh/id_ed25519.pub" --publish
+```
+
+To supply custom notes instead, write them outside the checkout, for example
+`/tmp/mycodex-release-notes.md`, and pass `--notes-file`:
 
 ```bash
 ./bin/release-myCodex 2026.10.1 --signing-key "$HOME/.ssh/id_ed25519.pub" --notes-file /tmp/mycodex-release-notes.md --publish
 ```
+
+An explicitly supplied notes file must exist. Resuming an existing draft keeps
+its notes, including any manual edits, rather than regenerating or replacing them.
 
 `--output-dir` optionally chooses a new directory outside the checkout; otherwise
 a retained temporary directory is printed. Replace the example key filename with
